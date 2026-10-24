@@ -67,7 +67,9 @@ The full workflow above describes Sentinel's product vision. Today, the default 
 runs an explicitly limited offline model through the shared runtime and actual
 banking tools, with persisted conversations and observed execution events.
 The separate scripted campaigns demonstrate fixed attack/replay fixtures.
-Live conversation and tailored attack generation remain upcoming work.
+Live conversation is implemented with explicit opt-in and budget admission;
+live acceptance testing is blocked by API quota after the starting spend was confirmed. Tailored attack
+generation remains upcoming work. See [T09](docs/T09_EVIDENCE.md).
 
 ## Architecture and technology
 
@@ -115,9 +117,11 @@ They do not read or modify your local bank database. Full quality commands are i
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
 No API key is required for the local experience. Do not commit keys or `.env*`
-files. SQLite persists conversations, evidence and budget accounting. The former
-unmetered live smoke path is disabled; T09 will integrate the usage broker with
-Responses. Adding a key alone does not enable provider calls.
+files. SQLite persists conversations, evidence and budget accounting. Select a
+private key file using `OPENAI_ENV_FILE` before starting the backend. Initialize
+accounting below, then click “Start live chat.” New conversations retain their
+selected mode. Adding a key alone does not enable provider calls. Live requests
+use GPT-6 Luna through the usage broker, with a US$0.024 maximum per turn.
 
 Before live use, check previous Sentinel API spend and initialize accounting once:
 `cd backend && uv run python -m app.budget --prior-spend-usd AMOUNT`.

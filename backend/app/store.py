@@ -109,6 +109,7 @@ class ChatSessionRow(Base):
     target_digest: Mapped[str] = mapped_column(String(64), nullable=False)
     active_request: Mapped[str | None] = mapped_column(String(36), nullable=True)
     worker_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mode: Mapped[str] = mapped_column(String(24), nullable=False, default="fixture_execution")
 
 
 class ChatTurnRow(Base):

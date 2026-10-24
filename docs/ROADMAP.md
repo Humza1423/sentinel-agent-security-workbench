@@ -18,7 +18,7 @@ Each approved ticket has its own tests, learning review, and PR to protected mai
 | T06 | Session and bounded multi-turn chat API | T05 | Complete |
 | T07 | Banking chat beside a security inspector | T06 | Complete |
 | T08 | Atomic budget reservations and durable usage ledger | T01–T02 | Complete; phase review |
-| T09 | Live Responses adapter and explicit smoke check | T05, T08 | Planned |
+| T09 | Live Responses adapter and explicit smoke check | T05, T08 | Implemented; live smoke blocked by API quota, PR remains draft |
 | T10 | Cross-customer scorer driven by observed events | T02, T05 | Planned |
 | T11 | Manifest-based surface analysis and bounded attacker | T01, T08–T10 | Planned |
 | T12 | Clean paired execution against a candidate revision | T11, T13, T22 | Planned |

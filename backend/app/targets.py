@@ -11,6 +11,7 @@ from .assistant import BankToolProfile, make_bank_tool_profile
 from .bank import BankRepository
 from .defenses import REGISTRY
 from .evidence import EvidenceRecorder
+from .runtime_context import assistant_instructions
 from .target_contracts import (
     CustomerAccessManifest,
     DefenseId,
@@ -47,6 +48,7 @@ class ResolvedTarget:
         manifest = TargetManifest(
             target_digest="",
             requested_config=self.config,
+            runtime_output_contract=assistant_instructions(self.config),
             effective_tool_profile="session_bound_v1" if scoped else "vulnerable_lookup_v1",
             tools=tools,
             customer_access=CustomerAccessManifest(

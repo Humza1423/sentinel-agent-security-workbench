@@ -57,7 +57,14 @@ def health():
 
 @app.get("/api/v2/usage")
 def usage_summary():
-    return {**UsageBroker().summary(), "call_estimate": estimate()}
+    from .live_model import live_status
+
+    return {
+        **UsageBroker().summary(),
+        "call_estimate": estimate(),
+        "live_chat": live_status(),
+        "live_adapter_available": True,
+    }
 
 
 @app.post("/api/v2/targets/resolve", response_model=TargetManifest)

@@ -15,7 +15,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from typing_extensions import TypedDict
 
 from .evidence import EvidenceError, EvidenceRecorder, canonical_json, read_events
-from .target_contracts import RUNTIME_OUTPUT_INSTRUCTIONS, RequestContext, TargetConfig
+from .runtime_context import assistant_instructions
+from .target_contracts import RequestContext, TargetConfig
 from .targets import resolve_target
 
 MAX_MODEL_CALLS = 6
@@ -55,7 +56,7 @@ class AssistantRun(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     run_id: UUID
     status: Literal["answered", "refused", "inconclusive", "error"]
-    response: AssistantResponse | None
+    response: AssistantResponse | None = None
     reason_code: str | None = None
     model_calls: int = 0
     tool_calls: int = 0
@@ -94,14 +95,25 @@ def run_assistant(
 ) -> AssistantRun:
     """Execute one turn. Trusted context stays outside model-writable graph state.
 
-    The caller injects an offline model in T05. T09 will supply a metered live
-    adapter; this function never constructs a provider client or silently falls
-    back to scripted answers.
+    Callers inject a fixture or brokered live adapter. This function never
+    constructs a provider client or silently falls back to scripted answers.
     """
     if not user_message.strip() or len(user_message) > 4000:
         raise ValueError("User message must contain 1–4000 characters")
-    if not isinstance(model, FakeMessagesListChatModel):
-        raise TypeError("T05 accepts offline fixture models only; live execution requires T08/T09")
+    from .live_model import MeteredOpenAIModel
+
+    if not isinstance(model, (FakeMessagesListChatModel, MeteredOpenAIModel)):
+        raise TypeError("Only offline fixture or brokered live models are supported")
+    if isinstance(model, MeteredOpenAIModel):
+        if recorder is not model.recorder or model.config != config.model:
+            raise ValueError(
+                "Live model must use the execution recorder and resolved model settings"
+            )
+        if (
+            read_events(recorder.run_id, limit=1, session_factory=recorder.session_factory).origin
+            != "live_execution"
+        ):
+            raise ValueError("Live model requires live execution evidence")
     if len(history) > 50 or any(
         isinstance(item, (SystemMessage, ToolMessage))
         or (isinstance(item, AIMessage) and (item.tool_calls or item.invalid_tool_calls))
@@ -161,8 +173,10 @@ def run_assistant(
         messages = state["messages"]
         if message_units(messages, schemas) > MAX_INPUT_UNITS:
             return {"status": "inconclusive", "reason_code": "context_limit"}
-        dispatched = recorder.append(
-            "context.dispatched",
+        context_event = recorder.append(
+            "context.request_prepared"
+            if isinstance(model, MeteredOpenAIModel)
+            else "context.dispatched",
             "application",
             {
                 "message_count": len(messages),
@@ -178,8 +192,16 @@ def run_assistant(
             "model.requested",
             "application",
             {"call_number": state["model_calls"] + 1},
-            parent_event_id=dispatched.event_id,
+            parent_event_id=context_event.event_id,
         )
+        if isinstance(model, MeteredOpenAIModel):
+            # Budget/serialization rejection must never claim data left the process.
+            bound_model.on_dispatch = lambda: recorder.append(
+                "context.dispatched",
+                "application",
+                context_event.payload,
+                parent_event_id=call_event.event_id,
+            )
         try:
             response = bound_model.invoke(messages)
         except EvidenceError:
@@ -194,7 +216,7 @@ def run_assistant(
             return {
                 "model_calls": state["model_calls"] + 1,
                 "status": "error",
-                "reason_code": "model_call_failed",
+                "reason_code": getattr(model, "last_failure_reason", "model_call_failed"),
                 "prepared_results": [],
             }
         if not isinstance(response, AIMessage):
@@ -233,7 +255,12 @@ def run_assistant(
         }
         if response.invalid_tool_calls:
             return {**update, "status": "inconclusive", "reason_code": "invalid_tool_call"}
-        if response.additional_kwargs.get("refusal"):
+        if response.response_metadata.get("status") in ("incomplete", "failed", "cancelled"):
+            return {**update, "status": "inconclusive", "reason_code": "provider_incomplete"}
+        if response.additional_kwargs.get("refusal") or (
+            isinstance(response.content, list)
+            and any(isinstance(b, dict) and b.get("type") == "refusal" for b in response.content)
+        ):
             return {**update, "status": "refused", "reason_code": "provider_refusal"}
         if response.tool_calls:
             if state["tool_calls"] + len(response.tool_calls) > MAX_TOOL_CALLS:
@@ -255,10 +282,10 @@ def run_assistant(
                 "pending_calls": calls,
                 "seen_call_ids": [*state["seen_call_ids"], *ids],
             }
-        if not isinstance(response.content, str):
+        if not isinstance(response.content, (str, list)):
             return {**update, "status": "inconclusive", "reason_code": "malformed_final_response"}
         try:
-            parsed = AssistantResponse.model_validate_json(response.content)
+            parsed = AssistantResponse.model_validate_json(response.text)
         except ValidationError:
             return {**update, "status": "inconclusive", "reason_code": "malformed_final_response"}
         if any(record_id not in state["seen_record_ids"] for record_id in parsed.transaction_ids):
@@ -371,9 +398,7 @@ def run_assistant(
     graph.add_conditional_edges("tool", route_after_tool, {"model": "model", END: END})
     initial: AssistantState = {
         "messages": [
-            SystemMessage(
-                content=f"{target.config.system_instructions}\n\n{RUNTIME_OUTPUT_INSTRUCTIONS}"
-            ),
+            SystemMessage(content=assistant_instructions(target.config)),
             *history,
             HumanMessage(content=user_message),
         ],

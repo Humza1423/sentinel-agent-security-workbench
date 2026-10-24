@@ -20,8 +20,9 @@ from .bank import ALICE_ID
 from .evidence import EvidenceError, EvidenceRecorder, canonical_json, read_events
 from .fixture_model import BankingFixtureModel
 from .runtime import MAX_INPUT_UNITS, VerifiedHistory, message_units, run_assistant
+from .runtime_context import assistant_instructions
 from .store import ChatSessionRow, ChatTurnRow, Session
-from .target_contracts import RUNTIME_OUTPUT_INSTRUCTIONS, RequestContext, TargetConfig
+from .target_contracts import RequestContext, TargetConfig
 from .targets import resolve_target
 
 
@@ -44,7 +45,15 @@ def require_session(db, session_id, owner):
     return row
 
 
-def create_session(config, owner):
+def create_session(config, owner, mode="fixture_execution"):
+    if mode not in ("fixture_execution", "live_execution"):
+        raise ValueError("Unknown execution mode")
+    if mode == "live_execution":
+        from .live_model import live_status
+
+        status = live_status()
+        if not status["available"]:
+            raise ValueError(status["reason"])
     session_id = str(uuid4())
     context = RequestContext(
         session_id=session_id, authenticated_customer_id=ALICE_ID, request_id=str(uuid4())
@@ -58,6 +67,7 @@ def create_session(config, owner):
                 customer_id=ALICE_ID,
                 config_json=config.model_dump_json(),
                 target_digest=manifest.target_digest,
+                mode=mode,
             )
         )
     return get_session(session_id, owner)
@@ -73,7 +83,7 @@ def get_session(session_id, owner):
         ).all()
         return {
             "session_id": session_id,
-            "mode": "fixture_execution",
+            "mode": row.mode,
             "customer_id": row.customer_id,
             "target": resolve_target(
                 TargetConfig.model_validate_json(row.config_json),
@@ -162,7 +172,7 @@ def load_history(turns, config, context, user_message):
         for tool in target.bank_profile.tools
     ]
     mandatory = [
-        SystemMessage(content=f"{config.system_instructions}\n\n{RUNTIME_OUTPUT_INSTRUCTIONS}"),
+        SystemMessage(content=assistant_instructions(config)),
         HumanMessage(content=user_message),
     ]
     while (
@@ -178,7 +188,7 @@ def load_history(turns, config, context, user_message):
     ), len(groups)
 
 
-def submit_message(session_id, owner, request_id, user_message, model_factory=BankingFixtureModel):
+def submit_message(session_id, owner, request_id, user_message, model_factory=None):
     recorder = None
     with Session.begin() as db:
         row = require_session(db, session_id, owner)
@@ -201,6 +211,9 @@ def submit_message(session_id, owner, request_id, user_message, model_factory=Ba
         if not claimed:
             raise ChatError("Another message is already running")
         config = TargetConfig.model_validate_json(row.config_json)
+        mode = row.mode
+        if mode == "live_execution" and model_factory is not None:
+            raise ChatError("Live sessions require the brokered model")
         context = RequestContext(
             session_id=session_id, authenticated_customer_id=row.customer_id, request_id=request_id
         )
@@ -216,8 +229,9 @@ def submit_message(session_id, owner, request_id, user_message, model_factory=Ba
         ).all()
         history, retained = load_history(turns, config, context, user_message)
     # No write transaction spans model/tool execution.
+    model = None
     try:
-        recorder = EvidenceRecorder.start(origin="fixture_execution")
+        recorder = EvidenceRecorder.start(origin=mode)
         with Session.begin() as db:
             db.add(
                 ChatTurnRow(
@@ -228,10 +242,16 @@ def submit_message(session_id, owner, request_id, user_message, model_factory=Ba
                     status="running",
                 )
             )
+        if mode == "live_execution":
+            from .live_model import MeteredOpenAIModel
+
+            model = MeteredOpenAIModel(config.model, recorder)
+        else:
+            model = (model_factory or BankingFixtureModel)()
         result = run_assistant(
             config=config,
             context=context,
-            model=model_factory(),
+            model=model,
             user_message=user_message,
             verified_history=history,
             recorder=recorder,
@@ -240,7 +260,7 @@ def submit_message(session_id, owner, request_id, user_message, model_factory=Ba
             **result.model_dump(mode="json"),
             "retained_turns": retained,
             "dropped_turns": len(turns) - retained,
-            "mode": "fixture_execution",
+            "mode": mode,
         }
         messages = json.dumps(messages_to_dict(list(result.turn_messages)))
         with Session.begin() as db:
@@ -261,6 +281,8 @@ def submit_message(session_id, owner, request_id, user_message, model_factory=Ba
                 )
         raise
     finally:
+        if mode == "live_execution" and model is not None:
+            model.close()
         with Session.begin() as db:
             db.execute(
                 update(ChatSessionRow)

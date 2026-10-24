@@ -20,6 +20,20 @@ def new_session():
     ], owner
 
 
+def test_live_session_mode_is_persisted_and_no_key_blocks_creation(monkeypatch):
+    config = TargetConfig(tool_profile="vulnerable_lookup_v1")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(ValueError, match="key"):
+        create_session(config, "owner", "live_execution")
+    monkeypatch.setattr("app.live_model.live_status", lambda: {"available": True})
+    result = create_session(config, "owner", "live_execution")
+    assert get_session(result["session_id"], "owner")["mode"] == "live_execution"
+    with pytest.raises(ChatError, match="brokered"):
+        submit_message(
+            result["session_id"], "owner", str(uuid4()), "hi", model_factory=lambda: None
+        )
+
+
 def test_followup_real_tools_history_and_idempotency():
     sid, owner = new_session()
     request = str(uuid4())

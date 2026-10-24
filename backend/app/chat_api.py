@@ -1,6 +1,7 @@
 """HTTP contracts for local synthetic banking conversations."""
 
 import secrets
+from typing import Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, HTTPException, Response
@@ -15,6 +16,7 @@ router = APIRouter(prefix="/api/v2/sessions")
 
 class CreateSession(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    mode: Literal["fixture_execution", "live_execution"] = "fixture_execution"
     target: TargetConfig = Field(
         default_factory=lambda: TargetConfig(tool_profile="vulnerable_lookup_v1")
     )
@@ -32,7 +34,7 @@ def create(
 ):
     owner = sentinel_owner or secrets.token_urlsafe(32)
     try:
-        result = chat.create_session(body.target, owner)
+        result = chat.create_session(body.target, owner, body.mode)
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from exc
     response.set_cookie("sentinel_owner", owner, httponly=True, samesite="strict", max_age=604800)

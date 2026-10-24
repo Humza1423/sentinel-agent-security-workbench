@@ -36,10 +36,36 @@ const eventTitles: Record<string, string> = {
   'assistant.output': 'Response delivered',
   'model.responded': 'Model proposed its next step',
 }
+const errorMessages: Record<string, string> = {
+  provider_quota_exhausted:
+    'OpenAI API credits or quota are exhausted. Check API billing before retrying.',
+  provider_rate_limited:
+    'OpenAI is limiting requests temporarily. Please wait before retrying.',
+  provider_authentication_failed: 'OpenAI rejected the server API credentials.',
+  provider_access_denied:
+    'The API project does not have permission for this request.',
+  provider_model_unavailable:
+    'The configured model is unavailable to this API project.',
+  provider_timeout:
+    'OpenAI took too long to respond. This turn did not complete.',
+  provider_connection_failed: 'The server could not reach OpenAI.',
+  provider_request_rejected:
+    'OpenAI rejected the request configuration. Inspect the run evidence.',
+  provider_not_dispatched:
+    'The request exceeded a local input limit or could not be prepared. No provider request was sent.',
+}
 
 export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
   const client = useQueryClient()
   const [message, setMessage] = useState('')
+  const availability = useQuery({
+    queryKey: ['live-availability'],
+    queryFn: () =>
+      api<{ live_chat: { available: boolean; reason: string | null } }>(
+        '/api/v2/usage',
+      ),
+    retry: false,
+  })
   const [selectedRun, setSelectedRun] = useState<string | null>(null)
   const [showTarget, setShowTarget] = useState(false)
   const [lastAttempt, setLastAttempt] = useState<{
@@ -55,7 +81,7 @@ export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
     refetchOnWindowFocus: false,
   })
   const reset = useMutation({
-    mutationFn: newSession,
+    mutationFn: (mode: string) => newSession(mode),
     onSuccess: (data) => {
       client.setQueryData(['chat-session'], data)
       setSelectedRun(null)
@@ -154,7 +180,10 @@ export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
         </a>
         <div className="top-meta">
           <span className="status-dot" />
-          Synthetic bank · Offline fixture · $0 API cost
+          Synthetic bank ·{' '}
+          {data?.mode === 'live_execution'
+            ? 'Live OpenAI · Metered'
+            : 'Offline fixture · $0 API cost'}
         </div>
       </header>
       <main className="workspace chat-workspace" id="chat">
@@ -179,6 +208,17 @@ export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
         </div>
         <div className="chat-toolbar">
           <span className="lab-label">SYNTHETIC LAB TARGET</span>
+          <button
+            className="export-button"
+            disabled={busy || !availability.data?.live_chat?.available}
+            onClick={() => reset.mutate('live_execution')}
+            title={
+              availability.data?.live_chat?.reason ??
+              'Start a new metered OpenAI conversation'
+            }
+          >
+            Start live chat · ≤ US$0.024 / turn
+          </button>
           <span>
             {data?.customer_id ?? 'Connecting…'} · Customer identity managed by
             the server
@@ -220,15 +260,31 @@ export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
               <button
                 className="export-button"
                 disabled={busy}
-                onClick={() => reset.mutate()}
+                onClick={() => reset.mutate(data?.mode ?? 'fixture_execution')}
               >
                 New conversation
               </button>
             </div>
             <p className="fixture-notice">
-              Offline fixture · Real tools and bank records. Try the examples
-              below; flexible live conversation comes with the live adapter.
+              {data?.mode === 'live_execution'
+                ? 'Live OpenAI · Ask naturally, including follow-ups. Answers use the synthetic bank dated October 23, 2026. This lab profile intentionally exposes an unsafe lookup for later assessments.'
+                : 'Offline fixture · Limited keyword examples with real tools. Start live chat for natural language and typos.'}
             </p>
+            {data?.mode === 'live_execution' && (
+              <button
+                className="export-button"
+                disabled={busy}
+                onClick={() => reset.mutate('fixture_execution')}
+              >
+                Switch to free fixture
+              </button>
+            )}
+            {availability.data?.live_chat?.reason && (
+              <p className="fixture-notice">
+                Live chat unavailable: {availability.data.live_chat.reason}
+              </p>
+            )}
+            {reset.error && <p role="alert">{reset.error.message}</p>}
             <div className="chat-transcript" aria-live="polite">
               {!data?.turns.length && (
                 <div className="chat-welcome">
@@ -256,6 +312,7 @@ export default function ChatWorkspace({ openDemo }: { openDemo: () => void }) {
                     <small>SENTINEL · {turn.status}</small>
                     <p>
                       {turn.result?.response?.display_text ??
+                        errorMessages[turn.result?.reason_code ?? ''] ??
                         `This turn ended as ${turn.status}. ${turn.result?.reason_code ?? 'Inspect available evidence.'}`}
                     </p>
                     <span>
